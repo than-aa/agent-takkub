@@ -285,6 +285,12 @@ class TerminalWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._page_ready = False
+        self._input_locked = False
+        self._font_px: int | None = None
+        self._pending_writes: list[str] = []
+        self._write_buf: list[str] = []
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -518,7 +524,7 @@ class TerminalWidget(QWidget):
         unaffected). Also tells xterm.js to drop local echo so a locked pane
         gives no typing feedback at all."""
         self._input_locked = bool(locked)
-        if self._page_ready:
+        if getattr(self, "_page_ready", False):
             try:
                 self._view.page().runJavaScript(
                     f"termSetLocked({'true' if self._input_locked else 'false'});"
