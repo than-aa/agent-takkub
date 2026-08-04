@@ -372,7 +372,7 @@ def _paste_payload(text: str) -> str:
     # path writes the text straight through too).
     if _PASTE_START in text or _PASTE_END in text:
         text = text.replace(_PASTE_START, "").replace(_PASTE_END, "")
-    if len(text) < BRACKETED_PASTE_THRESHOLD:
+    if "\n" not in text and len(text) < BRACKETED_PASTE_THRESHOLD:
         return text
     return _PASTE_START + text + _PASTE_END
 

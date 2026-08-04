@@ -115,6 +115,60 @@
     term.focus();
 
     // ------------------------------------------------------------------
+    // Key Handling & Custom Key Event Interceptors (registered synchronously
+    // at term.open time so no keystrokes are missed during WebChannel boot)
+    // ------------------------------------------------------------------
+    let bridge = null;
+    let inputLocked = false;
+    let xtermEmitted = false;
+
+    term.onData((data) => {
+      xtermEmitted = true;
+      if (inputLocked) return;  // pane is input-locked — swallow keystrokes
+      if (bridge && bridge.sendInput) bridge.sendInput(data);
+    });
+
+    // 1. Intercept Shift+Enter, Alt+Enter, Cmd+Enter on Mac & Bluetooth keyboards
+    term.attachCustomKeyEventHandler((ev) => {
+      const isEnter = ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13;
+      if (isEnter && (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey)) {
+        if (ev.type === 'keydown') {
+          xtermEmitted = true; // Mark as emitted so textarea fallback won't re-send previous text
+          const helperTextarea = document.querySelector('.xterm-helper-textarea');
+          if (helperTextarea) helperTextarea.value = ''; // Clear leftover text in textarea
+
+          if (!inputLocked && bridge && bridge.sendInput) {
+            bridge.sendInput('\x1b\r');  // ESC + Return: native Ink/Claude multiline newline
+          }
+        }
+        return false; // Return false for BOTH keydown and keyup so xterm.js never sends \r
+      }
+      return true;
+    });
+
+    // 2. Language Switch & Non-CJK Fallback Guard (e.g. Thai/EN layout switch, Grave Accent, Spacebar)
+    // When QtWebEngine sets keyCode 229 on layout switch, xterm.js ignores input.
+    // If xterm.js drops the first character (xtermEmitted remains false), flush helperTextarea.value directly!
+    const helperTextarea = document.querySelector('.xterm-helper-textarea');
+    if (helperTextarea) {
+      helperTextarea.addEventListener('input', () => {
+        const val = helperTextarea.value;
+        if (!val || val.includes('\n') || val.includes('\r')) return;
+
+        xtermEmitted = false;
+        setTimeout(() => {
+          if (!xtermEmitted && helperTextarea.value === val) {
+            if (inputLocked) return;
+            if (bridge && bridge.sendInput) {
+              bridge.sendInput(val);
+            }
+            helperTextarea.value = '';
+          }
+        }, 15);
+      });
+    }
+
+    // ------------------------------------------------------------------
     // Ctrl/Cmd + mouse-wheel font zoom
     // ------------------------------------------------------------------
     // pt/px conversion mirrors terminal_widget.py's set_font_point_size
@@ -159,36 +213,10 @@
     // ------------------------------------------------------------------
     // Qt bridge — exchange bytes with the Python side over QWebChannel
     // ------------------------------------------------------------------
-    let bridge = null;
-
-    // Input policy: pure pass-through. Every keystroke goes straight to
-    // the PTY and claude is the *only* writer to the screen. We tried
-    // local echo in v0.3.0–0.3.5 to mask claude's redraw latency, but
-    // claude's TUI renders arrive out of order under fast input, so a
-    // delayed render of "กพ" would overwrite a local erase and the
-    // user saw ghost chars stuck on screen.
-    //
-    // Every native terminal (iTerm, Windows Terminal, wezterm, ...)
-    // works this way. claude is slow when busy; the user feels that
-    // slowness but the display is *correct* and stays in sync.
-    //
-    // Kept for future reference: window.termSetIdle exists but is now
-    // a no-op so Python-side wiring doesn't need to be ripped out in
-    // lock-step.
     window.termSetIdle = function (_idle) { /* no-op since v0.3.6 */ };
-
-    // Input lock: when true, drop every user keystroke in JS before it even
-    // crosses the bridge (Python also guards, but stopping it here means no
-    // local feedback and no wasted IPC). Mirrored from Python via termSetLocked.
-    let inputLocked = false;
 
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
-
-      term.onData((data) => {
-        if (inputLocked) return;  // pane is input-locked — swallow keystrokes
-        if (bridge && bridge.sendInput) bridge.sendInput(data);
-      });
 
       // resize → tell PTY new cols/rows
       const reportResize = () => {
