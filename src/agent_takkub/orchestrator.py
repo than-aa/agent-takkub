@@ -84,11 +84,13 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _append_worktree_hint,
     _build_transcript_path,
     _cwd_within_project,
+    _describe_valid_project_cwds,
     _enter_delay_ms,
     _exit_key,
     _lead_model_override,
     _log_event,
     _paste_payload,
+    _project_root_dir,
     _read_tail_bytes,
     _render_daily_digest,
     _render_hot_md,
@@ -98,6 +100,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _task_handoff_dir,
     _task_handoff_pointer,
     _teammate_tier,
+    cwd_validation_error,
     prune_old_transcripts,
     scan_artifacts,
 )
@@ -159,7 +162,18 @@ from .vault_mirror import (  # re-exported for test + script imports
 # MainWindow keeps registering AgentPane instances unchanged.
 AgentPaneLike = AgentPane | HeadlessPane
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
+# Full ECMA-48 CSI + OSC stripper (issue #145). The old allowlist
+# (`[mABCDHJKSThlsu]` finals, `[0-9;]*` params) missed 3 real cases seen in
+# `takkub status` tail output: private-mode toggles like `\x1b[?25h`/`\x1b[?25l`
+# (the '?' is a valid CSI parameter byte the old class didn't include),
+# `\x1b[3G` (CHA — final byte 'G' wasn't in the allowlist), and OSC window-
+# title/hyperlink sequences (`\x1b]0;...\x07` / `...\x1b\\`) which are a
+# different escape family the old CSI-only pattern never matched at all.
+# CSI = `ESC [` + parameter bytes (0x30-0x3F) + intermediate bytes
+# (0x20-0x2F) + one final byte (0x40-0x7E), per ECMA-48 §5.4.
+# OSC = `ESC ]` + any bytes up to a BEL or ST (`ESC \`) terminator, per
+# ECMA-48 §5.6 / ECMA-35.
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 # Bound on how many bytes of a pane transcript we read to extract its tail for
 # `takkub status`. A long session's transcript grows to MBs; reading the whole
@@ -3156,6 +3170,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # recover (which closes the pane) doesn't fight with reminder
         # injection on the same pane.
         self._check_stuck_panes(now)
+        # Spawn FIFO queue escape hatch rides the same tick (#139/#140) — a
+        # wedged arbiter is caught even with no new spawn() call arriving to
+        # trip over it.
+        self._check_spawn_queue_stuck(now)
         # Flush durable done-notices for any project whose Lead is now idle.
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.

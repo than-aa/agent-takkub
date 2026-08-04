@@ -218,11 +218,14 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     shards = int(_raw_shards or 1)
     model = (getattr(args, "model", None) or "").strip() or None
     if model:
-        from .provider_config import assign_model_override_error
+        from .provider_config import assign_model_override_error, assign_model_override_warning
 
         model_error = assign_model_override_error(args.role, model, _from_project())
         if model_error:
             return {"ok": False, "msg": model_error}
+        model_warning = assign_model_override_warning(args.role, model, _from_project())
+        if model_warning:
+            print(f"warn: {model_warning}", file=sys.stderr)
     if shards > 1 and getattr(args, "auto_chain", False):
         return {
             "ok": False,
@@ -902,6 +905,17 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     if args.fix:
         run_auto_fixes(findings, install_providers=args.install_providers)
         findings = run_all_checks()
+
+    if getattr(args, "live", False):
+        from .doctor import check_spawn_queue_live
+
+        live_resp: dict | None = None
+        if read_port() is not None:
+            try:
+                live_resp = _request({"cmd": "spawn-queue-status"})
+            except Exception as e:
+                live_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+        findings += check_spawn_queue_live(live_resp)
 
     if args.json:
         import json as _json
@@ -1907,6 +1921,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    _COCKPIT_BUG_READ_HELP = (
+        "read from the agent-takkub install repo regardless of cwd (DEFAULT — "
+        "matches `issue new`'s default, so an issue filed with no flag is found "
+        "with no flag). Use --no-cockpit-bug to read the active project's repo "
+        "instead — must match whatever `--no-cockpit-bug` (or not) was used to "
+        "file the issue, or it queries the wrong store (#142)."
+    )
+
     # issue list
     sil = si_sub.add_parser("list", help="list issues with optional filters")
     sil.add_argument("--open", action="store_true", dest="open", help="show only open issues")
@@ -1914,6 +1936,13 @@ def main(argv: list[str] | None = None) -> int:
     sil.add_argument("--noticed-in", dest="noticed_in", default=None, metavar="PROJECT")
     sil.add_argument("--role", default=None, metavar="ROLE")
     sil.add_argument("--severity", choices=["low", "med", "high"], default=None)
+    sil.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=_COCKPIT_BUG_READ_HELP,
+    )
 
     # issue close
     sic = si_sub.add_parser("close", help="close an issue by GitHub number")
@@ -1921,10 +1950,24 @@ def main(argv: list[str] | None = None) -> int:
     sic.add_argument(
         "--note", default="", metavar="MSG", help="cause / fix summary (posted as comment)"
     )
+    sic.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=_COCKPIT_BUG_READ_HELP,
+    )
 
     # issue show
     sis = si_sub.add_parser("show", help="print issue from GitHub to stdout")
     sis.add_argument("id", help="GitHub issue number (e.g. 123, #123)")
+    sis.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=_COCKPIT_BUG_READ_HELP,
+    )
 
     # --issues-dir kept for backward compat — deprecated, issues.py emits a warning and ignores it
     for sp in (sin, sil, sic, sis):
@@ -2035,6 +2078,12 @@ def main(argv: list[str] | None = None) -> int:
         "--json",
         action="store_true",
         help="emit JSON instead of text report",
+    )
+    sdoc.add_argument(
+        "--live",
+        action="store_true",
+        help="also query the running cockpit for spawn-queue wedge state (#141); "
+        "skipped (not failed) when the cockpit isn't running",
     )
     sdoc.set_defaults(func=cmd_doctor)
 
