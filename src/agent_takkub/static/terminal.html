@@ -120,20 +120,25 @@
     // ------------------------------------------------------------------
     let bridge = null;
     let inputLocked = false;
-    let xtermEmitted = false;
+    let lastEmittedText = '';
+    let lastEmittedTime = 0;
+    let pendingCharText = '';
 
     term.onData((data) => {
-      xtermEmitted = true;
+      lastEmittedText = data;
+      lastEmittedTime = Date.now();
+      pendingCharText = '';
       if (inputLocked) return;  // pane is input-locked — swallow keystrokes
       if (bridge && bridge.sendInput) bridge.sendInput(data);
     });
 
     // 1. Intercept Shift+Enter, Alt+Enter, Cmd+Enter on Mac & Bluetooth keyboards
     term.attachCustomKeyEventHandler((ev) => {
-      const isEnter = ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13;
+      const isEnter = (ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13) &&
+                      ev.keyCode !== 229 && ev.key !== 'Process';
       if (isEnter && (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey)) {
         if (ev.type === 'keydown') {
-          xtermEmitted = true; // Mark as emitted so textarea fallback won't re-send previous text
+          lastEmittedTime = Date.now();
           const helperTextarea = document.querySelector('.xterm-helper-textarea');
           if (helperTextarea) helperTextarea.value = ''; // Clear leftover text in textarea
 
@@ -143,28 +148,61 @@
         }
         return false; // Return false for BOTH keydown and keyup so xterm.js never sends \r
       }
+
+      // 2. Intercept language switch keys ONLY (CapsLock / Grave Accent / Backquote)
+      // Do NOT intercept keyCode 229 / Process which belongs to the first typed character.
+      const isLanguageToggleKey = (
+        ev.key === 'CapsLock' || ev.code === 'CapsLock' || ev.keyCode === 20 ||
+        ev.keyCode === 192 || ev.code === 'Backquote' || (ev.key === '`' && !ev.shiftKey)
+      );
+
+      if (isLanguageToggleKey) {
+        const helperTextarea = document.querySelector('.xterm-helper-textarea');
+        if (helperTextarea) helperTextarea.value = ''; // Ensure textarea is clean
+        return false; // Return false for keydown, keypress, and keyup to block xterm from buffering backtick/caps
+      }
+
       return true;
     });
 
-    // 2. Language Switch & Non-CJK Fallback Guard (e.g. Thai/EN layout switch, Grave Accent, Spacebar)
-    // When QtWebEngine sets keyCode 229 on layout switch, xterm.js ignores input.
-    // If xterm.js drops the first character (xtermEmitted remains false), flush helperTextarea.value directly!
+    // 3. Language Switch & Non-CJK Fallback Guard (Caps Lock / Grave Accent / Cocoa NSTextInput)
+    // Catch any character (a, ฟ, Space, etc.) that xterm.js drops after CapsLock/Language switch.
     const helperTextarea = document.querySelector('.xterm-helper-textarea');
     if (helperTextarea) {
-      helperTextarea.addEventListener('input', () => {
-        const val = helperTextarea.value;
-        if (!val || val.includes('\n') || val.includes('\r')) return;
+      function flushTextareaInput() {
+        const val = helperTextarea.value || pendingCharText;
+        if (!val || val.includes('\n') || val.includes('\r') || val === '`' || val === 'Dead') return;
 
-        xtermEmitted = false;
-        setTimeout(() => {
-          if (!xtermEmitted && helperTextarea.value === val) {
-            if (inputLocked) return;
-            if (bridge && bridge.sendInput) {
-              bridge.sendInput(val);
-            }
-            helperTextarea.value = '';
+        const capturedVal = val;
+        pendingCharText = '';
+
+        // If xterm.js did NOT emit this character within 50ms:
+        const emittedByXterm = (lastEmittedText === capturedVal || lastEmittedText.includes(capturedVal)) && (Date.now() - lastEmittedTime <= 50);
+        if (!emittedByXterm) {
+          if (!inputLocked && bridge && bridge.sendInput) {
+            bridge.sendInput(capturedVal);
+            lastEmittedText = capturedVal;
+            lastEmittedTime = Date.now();
           }
-        }, 15);
+        }
+        if (helperTextarea.value === capturedVal) {
+          helperTextarea.value = '';
+        }
+      }
+
+      helperTextarea.addEventListener('beforeinput', (e) => {
+        if (e.data) {
+          pendingCharText = e.data;
+          setTimeout(flushTextareaInput, 5);
+        }
+      });
+
+      helperTextarea.addEventListener('input', () => {
+        setTimeout(flushTextareaInput, 5);
+      });
+
+      helperTextarea.addEventListener('compositionend', () => {
+        setTimeout(flushTextareaInput, 5);
       });
     }
 
