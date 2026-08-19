@@ -274,7 +274,8 @@ class TestListStatusDetailedWiring:
     byte-identical to before."""
 
     @pytest.fixture(scope="class")
-    def qapp(self) -> QCoreApplication:
+    @classmethod
+    def qapp(cls) -> QCoreApplication:
         app = QCoreApplication.instance()
         if app is None:
             app = QCoreApplication([])
